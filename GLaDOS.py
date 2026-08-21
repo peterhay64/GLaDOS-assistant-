@@ -220,6 +220,7 @@ def initialize_database():
     connector = sqlite3.connect(dataBase)
     #cursor is an object used to send SQL commands to the database 
     cursor = connector.cursor()
+    #creates a table called memory, with columns id, category, and memory, as well as a timestamp 
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS memory (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
