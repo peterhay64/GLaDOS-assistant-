@@ -38,7 +38,9 @@ from scipy.signal import resample_poly
 from openwakeword.model import Model 
  
 client = genai.Client() 
+#create object for recognizing speech
 recognizer = sr.Recognizer() 
+#set memory file 
 dataBase = "/home/glados/memory.db"
 
 
@@ -55,7 +57,7 @@ CHUNK = 2048
 
 audio = pyaudio.PyAudio()
 
-
+#audio settings for speech recognizer 
 recognizer.energy_threshold = 300
 recognizer.dynamic_energy_threshold = True
 recognizer.pause_threshold = 0.8
@@ -66,7 +68,7 @@ recognizer.non_speaking_duration = 0.5
 voice = PiperVoice.load("/home/glados/.venv/GladosTTS/glados_v2_epoch34.onnx")
 
 
-
+#The prompt that gemini uses whenever responding with GlaDOS' attitude, diction, and cadence 
 GladosPersonality = """You are GLaDOS, an advanced artificial intelligence overseeing a
 scientific testing facility.
 
@@ -168,7 +170,7 @@ Always remain in character as GLaDOS.
 """
 conversation = client.chats.create(model= "gemini-3.5-flash-lite", config=types.GenerateContentConfig(system_instruction=GladosPersonality))
 
-
+#function that waits for user to say "Hey GLaDOS" 
 def wait_for_wakeword():
     stream = audio.open(
         format=FORMAT,
@@ -213,9 +215,10 @@ def wait_for_wakeword():
 
 
 
-
+#opnes the  database file 
 def initialize_database():
     connector = sqlite3.connect(dataBase)
+    #cursor is an object used to send SQL commands to the database 
     cursor = connector.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS memory (
@@ -225,9 +228,13 @@ def initialize_database():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)
     ''') 
 
+    #makes the database changes permananet 
     connector.commit()
     connector.close()
 
+
+
+#opens the databse and creates a memory with an Id, ccategory, and information 
 def save_memory (category, memory):
     connector = sqlite3.connect(dataBase)
     cursor = connector.cursor() 
@@ -236,6 +243,8 @@ def save_memory (category, memory):
     connector.commit()
     connector.close()
 
+
+#function for retrieving memories, returns the text information from said memory 
 def get_memories():
      connector = sqlite3.connect(dataBase)
      cursor = connector.cursor()
@@ -250,6 +259,8 @@ def get_memories():
      connector.close()
      return memory    
 
+
+#This function gets the memories, and turns  them into plain text 
 def get_memory_context():
     memories = get_memories()
 
@@ -263,7 +274,11 @@ def get_memory_context():
 
     return memoryText
 
+
+
 def analyze_memory(user_input): 
+    #This function gives Gemini what the user said, and asks gemnini whether or not it has any information that needs to be remembered 
+    #If yes, the information is added into SQLite databse 
     prompt = f''' 
     Determine wether the following user message contains information that should be permanently remembered or stored for the user. 
     Only save information that would actually be useful in future conversations or interactions with the user. 
@@ -295,10 +310,12 @@ def process_memory(user_input):
 
             save_memory(category, memory)
             print(f"Memory saved: Category: {category}, Memory: {memory}")
+            
 
 def needs_memory(user_input):
+    #These are specific keywords that Gemini will look for that triggers a memory save 
     memory_keywords = [
-        "remeember", 
+        "remember", 
         "forgot", 
         "forget", 
         "favorite",
@@ -342,7 +359,7 @@ def speak(text):
         quiet_file
     ])
 
-
+# Will delete specific memories 
 def forget_memories(search_text):
     connector = sqlite3.connect(dataBase)
     cursor = connector.cursor() 
@@ -356,6 +373,7 @@ def forget_memories(search_text):
     connector.close()
     return deleted
 
+#This is similar to the other analyze function, it asks gemini whether or not the user input should delete a memory 
 def analyze_forget(user_input):
     prompt = f'''
     Determine if the following message is a request from the user to forget or delete a specific memory or piece of information.
