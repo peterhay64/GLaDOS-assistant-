@@ -64,7 +64,7 @@ recognizer.pause_threshold = 0.8
 recognizer.phrase_threshold = 0.3
 recognizer.non_speaking_duration = 0.5
 
-
+#The voice model to be used whilst speaking 
 voice = PiperVoice.load("/home/glados/.venv/GladosTTS/glados_v2_epoch34.onnx")
 
 
@@ -194,7 +194,7 @@ def wait_for_wakeword():
                 audio_data,
                 dtype=np.int16
             )
-
+# resamples audio since we capture atr 44100Hz, openwakeword expects 16000Hz 
             resampled_audio = resample_poly(
                 audio_array,
                 WAKE_RATE,
@@ -204,7 +204,7 @@ def wait_for_wakeword():
             prediction = wake_model.predict(resampled_audio)
 
             score = float(prediction["hey_jarvis_v0.1"])
-
+# openwakeword requires a confidence score of this, in order to actually allow GLaDOS to respond 
             if score > 0.6:
                 print(f"Wake word detected! Score: {score:.2f}")
                 break
@@ -336,14 +336,14 @@ def needs_memory(user_input):
 
 
 
-
+#actually runs the GLaDOS speech 
 def speak(text):
     output_file = "/tmp/glados_response.wav"
     quiet_file = "/tmp/glados_quiet.wav"
-
+#Uses the piper model to run the text that gemini produces 
     with wave.open(output_file, "wb") as wav_file:
         voice.synthesize_wav(text, wav_file)
-
+# use FFmpeg to lower the volume cause GLaDOS is kinda louud 
     subprocess.run([
         "ffmpeg",
         "-y",
