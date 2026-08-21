@@ -2,8 +2,27 @@ import cv2
 from picamera2 import Picamera2
 from ultralytics import YOLO 
 import time 
+import os
+import sys 
 
 from google import genai
+
+os.environ["SDL_AUDIODRIVER"] = "alsa"
+os.environ["JACK_NO_START_SERER"] = "1"
+
+class SuppressStderr:
+    def __enter__(self):
+        self.original_stderr = os.dup(2) 
+        self.devnull = os.open(os.devnull, os.O_WRONLY)
+        os.dup2(self.devnull, 2)
+    def __exit__(self, exc_type, exc_value, traceback):
+        os.dup2(self.original_stderr, 2)
+        os.close(self.devnull)
+        os.close(self.original_stderr)
+
+
+
+
 import speech_recognition as sr 
 from google.genai import types
 
@@ -11,10 +30,31 @@ import wave
 import subprocess
 from piper import PiperVoice
 
+import sqlite3 
 
+import pyaudio 
+import numpy as np 
+from scipy.signal import resample_poly
+from openwakeword.model import Model 
  
 client = genai.Client() 
 recognizer = sr.Recognizer() 
+dataBase = "/home/glados/memory.db"
+
+
+
+WAKE_MODEL = "/home/glados/.venv/lib/python3.13/site-packages/openwakeword/resources/models/hey_jarvis_v0.1.onnx"
+
+wake_model = Model(wakeword_model_paths=[WAKE_MODEL]) 
+
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+MIC_RATE = 44100
+WAKE_RATE = 16000
+CHUNK = 2048
+
+audio = pyaudio.PyAudio()
+
 
 recognizer.energy_threshold = 300
 recognizer.dynamic_energy_threshold = True
@@ -128,28 +168,274 @@ Always remain in character as GLaDOS.
 """
 conversation = client.chats.create(model= "gemini-3.5-flash-lite", config=types.GenerateContentConfig(system_instruction=GladosPersonality))
 
+
+def wait_for_wakeword():
+    stream = audio.open(
+        format=FORMAT,
+        channels=CHANNELS,
+        rate=MIC_RATE,
+        input=True,
+        input_device_index=0,
+        frames_per_buffer=CHUNK
+    )
+
+    print("Waiting for wake word...")
+
+    try:
+        while True:
+            audio_data = stream.read(
+                CHUNK,
+                exception_on_overflow=False
+            )
+
+            audio_array = np.frombuffer(
+                audio_data,
+                dtype=np.int16
+            )
+
+            resampled_audio = resample_poly(
+                audio_array,
+                WAKE_RATE,
+                MIC_RATE
+            ).astype(np.int16)
+
+            prediction = wake_model.predict(resampled_audio)
+
+            score = float(prediction["hey_jarvis_v0.1"])
+
+            if score > 0.6:
+                print(f"Wake word detected! Score: {score:.2f}")
+                break
+
+    finally:
+        stream.stop_stream()
+        stream.close()
+
+
+
+
+def initialize_database():
+    connector = sqlite3.connect(dataBase)
+    cursor = connector.cursor()
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS memory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            category TEXT, 
+            memory TEXT ,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)
+    ''') 
+
+    connector.commit()
+    connector.close()
+
+def save_memory (category, memory):
+    connector = sqlite3.connect(dataBase)
+    cursor = connector.cursor() 
+
+    cursor.execute("INSERT INTO memory (category, memory) VALUES (?, ? )", (category, memory)) 
+    connector.commit()
+    connector.close()
+
+def get_memories():
+     connector = sqlite3.connect(dataBase)
+     cursor = connector.cursor()
+
+     cursor.execute('''
+        SELECT category, memory
+        FROM memory 
+        ORDER BY created_at DESC
+        ''')
+
+     memory = cursor.fetchall()
+     connector.close()
+     return memory    
+
+def get_memory_context():
+    memories = get_memories()
+
+    if not memories:
+        return "No memories found." \
+
+    memoryText = ""
+
+    for category, memory in memories:
+        memoryText += f"{category}: {memory}\n"
+
+    return memoryText
+
+def analyze_memory(user_input): 
+    prompt = f''' 
+    Determine wether the following user message contains information that should be permanently remembered or stored for the user. 
+    Only save information that would actually be useful in future conversations or interactions with the user. 
+    This can include personal facts, preferenes, goals, reminders, project details, or things that the user has explicitly asked you to remember.
+
+    If something should be remembered respond like this: 
+    SAVE|category|memory 
+
+    IF nothing should be remembered, respond like this: 
+
+    NOTHING 
+
+    User message: {user_input}
+    '''
+    response = client.models.generate_content(model="gemini-3.5-flash-lite", contents=prompt)
+    return response.text.strip() 
+
+
+def process_memory(user_input):
+    result = analyze_memory(user_input)
+    print("Memory Analysis Result:", result)
+
+    if result.startswith("SAVE|"):
+        parts = result.split("|", 2)
+
+        if len(parts) == 3:
+            category = parts[1].strip() 
+            memory = parts[2].strip()
+
+            save_memory(category, memory)
+            print(f"Memory saved: Category: {category}, Memory: {memory}")
+
+def needs_memory(user_input):
+    memory_keywords = [
+        "remeember", 
+        "forgot", 
+        "forget", 
+        "favorite",
+        "remind", 
+        "log", 
+        "remind me", 
+        "i like", 
+        "my goal", 
+        "save this", 
+        "log this"
+    ]
+
+    user_lower = user_input.lower()
+    return any(keyword in user_lower for keyword in memory_keywords)
+
+
+
+
+
+
+
 def speak(text):
     output_file = "/tmp/glados_response.wav"
+    quiet_file = "/tmp/glados_quiet.wav"
 
     with wave.open(output_file, "wb") as wav_file:
         voice.synthesize_wav(text, wav_file)
-    subprocess.run(["aplay", "-D", "plughw:3,0", output_file])
+
+    subprocess.run([
+        "ffmpeg",
+        "-y",
+        "-loglevel", "quiet",
+        "-i", output_file,
+        "-filter:a", "volume=0.4",
+        quiet_file
+    ])
+
+    subprocess.run([
+        "aplay",
+        "-D", "plughw:3,0",
+        quiet_file
+    ])
+
+
+def forget_memories(search_text):
+    connector = sqlite3.connect(dataBase)
+    cursor = connector.cursor() 
+    cursor.execute('''
+        DELETE FROM memory 
+        WHERE memory LIKE ?
+        ''', (f"%{search_text}%",))
+
+    deleted = cursor.rowcount
+    connector.commit()
+    connector.close()
+    return deleted
+
+def analyze_forget(user_input):
+    prompt = f'''
+    Determine if the following message is a request from the user to forget or delete a specific memory or piece of information.
+    If they are asking to forget something, resondexactly: FORGET|search text
+    If they are not asking to forget anything, respond exactly: NOTHING 
+    
+    Examples: 
+    User: "Forget that I like chocolate." 
+    FORGET|favorite food
+    
+    User message: 
+    {user_input}'''
+
+    response = client.models.generate_content(model="gemini-3.5-flash-lite", config=types.GenerateContentConfig(system_instruction=GladosPersonality), contents=prompt)
+    return response.text.strip()
+
+def process_forget(user_input):
+    result = analyze_forget(user_input)
+    print("Forget Analysis", result)
+    if result.startswith("FORGET|"):
+        search_text = result.split("|", 1)[1].strip()
+        deleted_count = forget_memories(search_text)
+        print(f"Deleted {deleted_count} memories matching: {search_text}")
+        return deleted_count
+    return 0 
+
+initialize_database()
+memories = get_memories()
 
 
 while True:
     try:
+        with SuppressStderr():
 
-        with sr.Microphone(
-            device_index=0,
-            sample_rate=44100,
-            chunk_size=1024
-        ) as source:
-            print("Listening...")
-            recognizer.adjust_for_ambient_noise(source, duration=1)
-            userAudio = recognizer.listen(source, timeout=5, phrase_time_limit=5)
+            wait_for_wakeword()
+            
+            print("wake word detected")
+
+            with sr.Microphone(
+                device_index=0,
+                sample_rate=44100,
+                chunk_size=2048
+            ) as source:
+                print("Listening...")
+                recognizer.adjust_for_ambient_noise(source, duration=1)
+                userAudio = recognizer.listen(source, timeout=5, phrase_time_limit=8)
         user_input = recognizer.recognize_google(userAudio)
-        print("You: ", user_input)
+        print("You: ", user_input.lower())
+
+        check_text = user_input.lower()
+        glados_name_variations = ["glados", "gla dos", "gla-dos", "lettuce", "glad so", "glad us", "glad os", "Gladys", "GLaDOS", "glad is" ]
+
+        if not any (word in check_text for word in glados_name_variations):
+            print("Use GLADOS NAME")
+            continue
+          
+
+        process_memory(user_input)
+        process_forget(user_input)
+
+        if needs_memory(user_input):
+            memory_context = get_memory_context() 
+            prompt  = f''' here are the memories stored by the user:
+            {memory_context}
+            The user said: "{user_input}"
+            Use the memories only if they are relevant to the user's current message, if they are not, ignore. '''
+        else:response = conversation.send_message(user_input)
+
         response = conversation.send_message(user_input)
+
+        memory_context = get_memory_context()
+        prompt =f''' Here are the memories of the user:
+        {memory_context}
+        The user said: "{user_input}"
+        '''
+        response = conversation.send_message(prompt)
+
+
+
+
         print("GLaDOS: ", response.text)
         speak(response.text)
     except sr.UnknownValueError:
